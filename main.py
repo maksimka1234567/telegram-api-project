@@ -15,12 +15,11 @@ logger = logging.getLogger(__name__)
 WAITING_FOR_INPUT = 1
 WAITING_FOR_FIRST_OBJECT = 2
 WAITING_FOR_SECOND_OBJECT = 3
-SERVER_ADDRESS = 'http://geocode-maps.yandex.ru/1.x/?'
 API_KEY = '8013b162-6b42-4997-9691-77b7074026e0'
 
 
 def get_coords(user_input):
-    geocoder_request = f'{SERVER_ADDRESS}apikey={API_KEY}&geocode={user_input}&format=json'
+    geocoder_request = f'http://geocode-maps.yandex.ru/1.x/?apikey={API_KEY}&geocode={user_input}&format=json'
     response = requests.get(geocoder_request)
     data = response.json()
     coordinates = data['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['Point']['pos']
@@ -35,7 +34,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработчик команды /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Это справка по боту. Доступные команды: /start, /help, /geocode.")
+    await update.message.reply_text(
+        "Это справка по боту. Доступные команды: /start (запуск), /help (справка), /geocode (поиск объекта), /route (построение маршрута между двумя объектами).")
 
 
 # Начало диалога
