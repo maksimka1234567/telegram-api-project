@@ -4,7 +4,7 @@ from PIL import Image
 import logging
 from config import BOT_TOKEN
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, ContextTypes, \
+from telegram.ext import CommandHandler, MessageHandler, ConversationHandler, ContextTypes, \
     Application, filters
 
 logging.basicConfig(
@@ -12,10 +12,12 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-WAITING_FOR_INPUT = 1
+WAITING_FOR_GEOCODE_INPUT = 1
 WAITING_FOR_FIRST_OBJECT = 2
 WAITING_FOR_SECOND_OBJECT = 3
+WAITING_FOR_WEATHER_INPUT = 4
 API_KEY = '8013b162-6b42-4997-9691-77b7074026e0'
+WEATHER_KEY = 'c0c8ea3bf67266e89078d8488a2ac94d'
 
 
 def get_coords(user_input):
@@ -35,18 +37,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Обработчик команды /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Это справка по боту. Доступные команды: /start (запуск), /help (справка), /geocode (поиск объекта), /route (построение маршрута между двумя объектами).")
+        "Это справка по боту. Доступные команды: /start (запуск), /help (справка), /geocode (поиск объекта), "
+        "/route (построение маршрута между двумя объектами), /weather (получение информации о погоде)."
+    )
 
 
 # Начало диалога
 async def start_geocode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Введите название географического объекта:')
-    return WAITING_FOR_INPUT
+    return WAITING_FOR_GEOCODE_INPUT
 
 
 async def start_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Введите название первого географического объекта:')
     return WAITING_FOR_FIRST_OBJECT
+
+
+async def start_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Введите название города:')
+    return WAITING_FOR_WEATHER_INPUT
 
 
 # Обработка ввода пользователя
@@ -90,8 +99,8 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Произошла ошибка: {e}")
-        await update.message.reply_text('Не удаётся найти данный географический объект.')
-        return WAITING_FOR_INPUT
+        await update.message.reply_text('Не удаётся найти данный географический объект. Попробуйте снова.')
+        return WAITING_FOR_GEOCODE_INPUT
 
 
 async def handle_first_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -156,16 +165,62 @@ async def route(update: Update, context: ContextTypes.DEFAULT_TYPE, start, end):
     return ConversationHandler.END
 
 
+async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global WEATHER_KEY
+    city = update.message.text
+    chat_id = update.message.chat_id
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru"
+        response = requests.get(url)
+        data = response.json()
+        image_url = f'https://openweathermap.org/img/wn/{data['weather'][0]['icon']}@2x.png'
+        response_to_image = requests.get(image_url)
+        image = Image.open(BytesIO(response_to_image.content))
+        # Создание нового изображения с голубым фоном
+        background_color = (135, 206, 250)  # RGB-значение голубого цвета
+        new_image = Image.new("RGB", image.size, background_color)
+
+        # Наложение исходного изображения на новый фон
+        new_image.paste(image, (0, 0), image if image.mode == 'RGBA' else None)
+        new_image.save('img.png')
+        city_id = data['id']
+        keyboard = [
+            [InlineKeyboardButton("Открыть подробную сводку о погоде",
+                                  url=f"https://openweathermap.org/city/{city_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        country = data['sys']['country']
+        temp = f"Температура: {data['main']['temp']}°C"
+        condition = f"Состояние: {data['weather'][0]['description']}"
+        humidity = f"Влажность: {data['main']['humidity']}%"
+        wind_speed = f"Скорость ветра: {data['wind']['speed']} м/с"
+        with open("img.png", 'rb') as photo:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                caption=f"Город: {city.capitalize()}\nСтрана: {country}\n{temp}\n{condition}\n{humidity}\n"
+                        f"{wind_speed}\nНажмите на кнопку, чтобы посмотреть подробную сводку о погоде:",
+                photo=photo,
+                reply_markup=reply_markup
+            )
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Произошла ошибка при обработке города: {e}")
+        await update.message.reply_text('Не удаётся получить информацию о погоде в этом городе. Попробуйте снова.')
+        return WAITING_FOR_WEATHER_INPUT
+
+
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('geocode', start_geocode),
-                      CommandHandler('route', start_route)
+                      CommandHandler('route', start_route),
+                      CommandHandler('weather', start_weather)
                       ],
         states={
-            WAITING_FOR_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_location)],
+            WAITING_FOR_GEOCODE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_location)],
             WAITING_FOR_FIRST_OBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_first_object)],
             WAITING_FOR_SECOND_OBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_second_object)],
+            WAITING_FOR_WEATHER_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_weather)],
         },
         fallbacks=[],
     )
