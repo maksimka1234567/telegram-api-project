@@ -54,7 +54,7 @@ async def start_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Введите название города:')
+    await update.message.reply_text('Введите название населённого пункта:')
     return WAITING_FOR_WEATHER_INPUT
 
 
@@ -100,6 +100,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Произошла ошибка: {e}")
         await update.message.reply_text('Не удаётся найти данный географический объект. Попробуйте снова.')
+        await update.message.reply_text('Введите название географического объекта:')
         return WAITING_FOR_GEOCODE_INPUT
 
 
@@ -117,6 +118,7 @@ async def handle_first_object(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Произошла ошибка при обработке первого объекта: {e}")
         await update.message.reply_text('Не удаётся найти данный географический объект. Попробуйте снова.')
+        await update.message.reply_text('Введите название первого географического объекта:')
         return WAITING_FOR_FIRST_OBJECT
 
 
@@ -135,38 +137,49 @@ async def handle_second_object(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"Произошла ошибка при обработке второго объекта: {e}")
         await update.message.reply_text('Не удаётся найти данный географический объект. Попробуйте снова.')
+        await update.message.reply_text('Введите название второго географического объекта:')
         return WAITING_FOR_SECOND_OBJECT
 
 
 async def route(update: Update, context: ContextTypes.DEFAULT_TYPE, start, end):
-    response_for_route = (
-        f"https://static-maps.yandex.ru/1.x/?l=map&pl="
-        f"c:ec473fFF,w:5,{start[0]},{start[1]},{end[0]},{end[1]}"
-        f"&pt={start[0]},{start[1]},pm2rdm~{end[0]},{end[1]},pm2rdm"
-    )
-    chat_id = update.message.chat_id
-    response = requests.get(response_for_route)
-    image_data = response.content
-    image = Image.open(BytesIO(image_data))
-    keyboard = [
-        [InlineKeyboardButton("Открыть карту",
-                              url=f"https://yandex.ru/maps/?rtext={start[1]},{start[0]}~{end[1]},{end[0]}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    image.save("img.png")
-
-    with open("img.png", 'rb') as photo:
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=photo,
-            caption="Маршрут построен\nНажмите на кнопку, чтобы открыть карту:",
-            reply_markup=reply_markup
+    try:
+        response_for_route = (
+            f"https://static-maps.yandex.ru/1.x/?l=map&pl="
+            f"c:ec473fFF,w:5,{start[0]},{start[1]},{end[0]},{end[1]}"
+            f"&pt={start[0]},{start[1]},pm2rdm~{end[0]},{end[1]},pm2rdm"
         )
-    return ConversationHandler.END
+        chat_id = update.message.chat_id
+        response = requests.get(response_for_route)
+        image_data = response.content
+        image = Image.open(BytesIO(image_data))
+        keyboard = [
+            [InlineKeyboardButton("Открыть карту",
+                                  url=f"https://yandex.ru/maps/?rtext={start[1]},{start[0]}~{end[1]},{end[0]}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        image.save("img.png")
+
+        with open("img.png", 'rb') as photo:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption="Маршрут построен\nНажмите на кнопку, чтобы открыть карту:",
+                reply_markup=reply_markup
+            )
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Произошла ошибка при обработке второго объекта: {e}")
+        await update.message.reply_text('Не удаётся построить маршрут. Попробуйте снова.')
+        await update.message.reply_text('Введите название первого географического объекта:')
+        return WAITING_FOR_FIRST_OBJECT
 
 
 async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global WEATHER_KEY
+    if not update.message:
+        logger.debug("Получено обновление без текстового сообщения")
+        return
+
     city = update.message.text
     chat_id = update.message.chat_id
     try:
@@ -195,10 +208,12 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         condition = f"Состояние: {data['weather'][0]['description']}"
         humidity = f"Влажность: {data['main']['humidity']}%"
         wind_speed = f"Скорость ветра: {data['wind']['speed']} м/с"
+        pressure = f"Давление: {data['main']['pressure']} мбар"
+        visibility = f"Видимость: {float(data['visibility']) / 1000} км"
         with open("img.png", 'rb') as photo:
             await context.bot.send_photo(
                 chat_id=chat_id,
-                caption=f"Город: {city.capitalize()}\nСтрана: {country}\n{temp}\n{feels_like}\n{condition}\n{humidity}\n"
+                caption=f"Город: {city.capitalize()}\nСтрана: {country}\n{temp}\n{feels_like}\n{condition}\n{humidity}\n{pressure}\n{visibility}\n"
                         f"{wind_speed}\nНажмите на кнопку, чтобы посмотреть подробную сводку о погоде:",
                 photo=photo,
                 reply_markup=reply_markup
@@ -206,7 +221,9 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Произошла ошибка при обработке города: {e}")
-        await update.message.reply_text('Не удаётся получить информацию о погоде в этом городе. Попробуйте снова.')
+        await update.message.reply_text(
+            'Не удаётся получить информацию о погоде в этом населённом пункте. Попробуйте снова.')
+        await update.message.reply_text('Введите название населённого пункта:')
         return WAITING_FOR_WEATHER_INPUT
 
 
