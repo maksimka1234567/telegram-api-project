@@ -191,13 +191,14 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         country = data['sys']['country']
         temp = f"Температура: {data['main']['temp']}°C"
+        feels_like = f"Ощущается как: {data['main']['feels_like']}°C"
         condition = f"Состояние: {data['weather'][0]['description']}"
         humidity = f"Влажность: {data['main']['humidity']}%"
         wind_speed = f"Скорость ветра: {data['wind']['speed']} м/с"
         with open("img.png", 'rb') as photo:
             await context.bot.send_photo(
                 chat_id=chat_id,
-                caption=f"Город: {city.capitalize()}\nСтрана: {country}\n{temp}\n{condition}\n{humidity}\n"
+                caption=f"Город: {city.capitalize()}\nСтрана: {country}\n{temp}\n{feels_like}\n{condition}\n{humidity}\n"
                         f"{wind_speed}\nНажмите на кнопку, чтобы посмотреть подробную сводку о погоде:",
                 photo=photo,
                 reply_markup=reply_markup
