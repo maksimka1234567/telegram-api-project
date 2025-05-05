@@ -6,6 +6,7 @@ from config import BOT_TOKEN
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, MessageHandler, ConversationHandler, ContextTypes, \
     Application, filters
+import sqlite3
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
@@ -40,6 +41,34 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Это справка по боту. Доступные команды: /start (запуск), /help (справка), /geocode (поиск объекта), "
         "/route (построение маршрута между двумя объектами), /weather (получение информации о погоде)."
     )
+
+
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    con = sqlite3.connect('requests.db')
+    # Создание курсора
+    cur = con.cursor()
+    all_requests = cur.execute('''SELECT * from history''').fetchall()
+    if len(all_requests) > 5:
+        all_requests = all_requests[-5:]
+    for message in all_requests:
+        # Открываем изображение
+        image = Image.open(BytesIO(message[1]))
+        image.save("img.png")
+        # Формируем клавиатуру
+        if message[3] and message[3].startswith('https://openweathermap.org/city/'):
+            keyboard = [[InlineKeyboardButton("Открыть подробную сводку о погоде", url=message[3])]]
+        else:
+            keyboard = [[InlineKeyboardButton("Открыть карту", url=message[3])]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        with open("img.png", 'rb') as photo:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=message[2],
+                reply_markup=reply_markup
+            )
+    con.close()
 
 
 # Начало диалога
@@ -95,6 +124,16 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"Найден объект: {user_input}\nНажмите на кнопку, чтобы открыть карту:",
                 reply_markup=reply_markup
             )
+        con = sqlite3.connect('requests.db')
+        # Считываем бинарные данные из файла
+        with open("img.png", "rb") as file:
+            photo_blob = file.read()
+        # Создание курсора
+        cur = con.cursor()
+        cur.execute('''INSERT INTO history (photo, text, link) VALUES (?, ?, ?)''', (
+            photo_blob, f"Найден объект: {user_input}\nНажмите на кнопку, чтобы открыть карту:", geocoder_request[0]))
+        con.commit()
+        con.close()
         return ConversationHandler.END
 
     except Exception as e:
@@ -163,9 +202,20 @@ async def route(update: Update, context: ContextTypes.DEFAULT_TYPE, start, end):
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=photo,
-                caption="Маршрут построен\nНажмите на кнопку, чтобы открыть карту:",
+                caption=f"Маршрут построен: {start} - {end}\nНажмите на кнопку, чтобы открыть карту:",
                 reply_markup=reply_markup
             )
+        con = sqlite3.connect('requests.db')
+        # Считываем бинарные данные из файла
+        with open("img.png", "rb") as file:
+            photo_blob = file.read()
+        # Создание курсора
+        cur = con.cursor()
+        cur.execute('''INSERT INTO history (photo, text, link) VALUES (?, ?, ?)''', (
+            photo_blob, f"Маршрут построен: {start} - {end}\nНажмите на кнопку, чтобы открыть карту:",
+            f"https://yandex.ru/maps/?rtext={start[1]},{start[0]}~{end[1]},{end[0]}"))
+        con.commit()
+        con.close()
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Произошла ошибка при обработке второго объекта: {e}")
@@ -218,6 +268,19 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=photo,
                 reply_markup=reply_markup
             )
+        con = sqlite3.connect('requests.db')
+        # Считываем бинарные данные из файла
+        with open("img.png", "rb") as file:
+            photo_blob = file.read()
+        # Создание курсора
+        cur = con.cursor()
+        cur.execute('''INSERT INTO history (photo, text, link) VALUES (?, ?, ?)''', (
+            photo_blob,
+            f"Город: {city.capitalize()}\nСтрана: {country}\n{temp}\n{feels_like}\n{condition}\n{humidity}\n{pressure}\n{visibility}\n"
+            f"{wind_speed}\nНажмите на кнопку, чтобы посмотреть подробную сводку о погоде:",
+            f"https://openweathermap.org/city/{city_id}"))
+        con.commit()
+        con.close()
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Произошла ошибка при обработке города: {e}")
@@ -246,6 +309,7 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("history", history))
     application.run_polling()
 
 
