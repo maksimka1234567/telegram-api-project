@@ -5,7 +5,7 @@ import logging
 from config import BOT_TOKEN
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, MessageHandler, ConversationHandler, ContextTypes, \
-    Application, filters
+    Application, filters, CallbackQueryHandler
 import sqlite3
 
 logging.basicConfig(
@@ -43,14 +43,69 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_history_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Показать историю погоды", callback_data='weather_history')],
+        [InlineKeyboardButton("Показать историю карт", callback_data='map_history')],
+        [InlineKeyboardButton("Показать всю историю", callback_data='all_history')],
+        [InlineKeyboardButton("Очистить историю", callback_data='clear_history')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('Выберите один из предложенных вариантов:', reply_markup=reply_markup)
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    history_type = query.data
+
+    if history_type == 'weather_history':
+        await history(query, context, type=1)
+    elif history_type == 'map_history':
+        await history(query, context, type=2)
+    elif history_type == 'all_history':
+        await history(query, context, type=3)
+    elif history_type == 'clear_history':
+        await history(query, context, type=4)
+
+
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
     chat_id = update.message.chat_id
     con = sqlite3.connect('requests.db')
     # Создание курсора
     cur = con.cursor()
-    all_requests = cur.execute('''SELECT * from history''').fetchall()
+    if type == 4:
+        cur.execute('''DELETE from history''')
+        con.commit()
+        await update.message.reply_text('История успешно очищена.')
+        con.close()
+        return
+    elif type == 1:
+        # Запрашиваем только записи с ссылкой на OpenWeather
+        all_requests = cur.execute(
+            '''SELECT * FROM history WHERE link LIKE "https://openweathermap.org/city/%"''').fetchall()
+    elif type == 2:
+        all_requests = cur.execute('''SELECT * FROM history WHERE link NOT LIKE "https://openweathermap.org/city/%"''').fetchall()
+    elif type == 3:
+        all_requests = cur.execute('''SELECT * from history''').fetchall()
+    if len(all_requests) == 0:
+        if type == 1:
+            await update.message.reply_text('В последнее время не было запросов на получение информации о погоде.')
+        elif type == 2:
+            await update.message.reply_text('В последнее время не было запросов на получение Яндекс.карт.')
+        elif type == 3:
+            await update.message.reply_text('В последнее время не было запросов.')
+        con.close()
+        return
     if len(all_requests) > 5:
         all_requests = all_requests[-5:]
+    if type == 1:
+        await update.message.reply_text('Вот история запросов на получение информации о погоде:')
+    elif type == 2:
+        await update.message.reply_text('Вот история запросов Яндекс.Карт:')
+    elif type == 3:
+        await update.message.reply_text('Вот вся история запросов:')
     for message in all_requests:
         # Открываем изображение
         image = Image.open(BytesIO(message[1]))
@@ -69,6 +124,7 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup
             )
     con.close()
+    return
 
 
 # Начало диалога
@@ -309,7 +365,8 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("history", history))
+    application.add_handler(CommandHandler("history", show_history_options))
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.run_polling()
 
 
