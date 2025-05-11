@@ -52,7 +52,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Это справка по боту. Доступные команды: /start (запуск), /help (справка), /geocode (поиск объекта), "
-        "/route (построение маршрута между двумя объектами), /weather (получение информации о погоде)."
+        "/route (построение маршрута между двумя объектами), /weather (получение информации о погоде), /history (просмотр истории запросов), "
+        "/favorite (просмотр избранных мест), /search (поиск нужных мест поблизости)."
     )
 
 
@@ -203,7 +204,8 @@ async def search(update, context):
             })
         results.sort(key=lambda x: x["distance"])
         top_results = results[:3]
-        await update.message.reply_text(f'Вблизи от места "{context.user_data.get('place')[1]}" найдены следующие объекты типа "{user_input}":')
+        await update.message.reply_text(
+            f'Вблизи от места "{context.user_data.get('place')[1]}" найдены следующие объекты типа "{user_input}":')
         for i in top_results:
             name = i['name']
             lon, lat = i['coords']
@@ -211,8 +213,8 @@ async def search(update, context):
             response = requests.get(geocoder_request)
             json_response = response.json()
             address = \
-            json_response["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]["metaDataProperty"][
-                "GeocoderMetaData"]['text']
+                json_response["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]["metaDataProperty"][
+                    "GeocoderMetaData"]['text']
             # Вычисляем bbox для одного объекта (небольшая область вокруг точки)
             delta = 0.01  # Размер области вокруг точки (широта/долгота)
             bbox = f"{lon - delta},{lat - delta}~{lon + delta},{lat + delta}"
@@ -241,7 +243,8 @@ async def search(update, context):
             # Создание курсора
             cur = con.cursor()
             cur.execute('''INSERT INTO history (photo, text, link) VALUES (?, ?, ?)''', (
-                photo_blob, f"{str(user_input).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
+                photo_blob,
+                f"{str(user_input).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
                 f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm"))
             con.commit()
             con.close()
