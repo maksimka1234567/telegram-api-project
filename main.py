@@ -17,8 +17,21 @@ WAITING_FOR_GEOCODE_INPUT = 1
 WAITING_FOR_FIRST_OBJECT = 2
 WAITING_FOR_SECOND_OBJECT = 3
 WAITING_FOR_WEATHER_INPUT = 4
+WAITING_FOR_TYPE_INPUT = 5
+WAITING_FOR_PLACE_INPUT = 6
 API_KEY = '8013b162-6b42-4997-9691-77b7074026e0'
 WEATHER_KEY = 'c0c8ea3bf67266e89078d8488a2ac94d'
+
+
+# Формирование OverpassQL-запроса
+def get_overpass_query(query: str, lat: float, lon: float, radius: int = 10000) -> str:
+    osm_key_value = f'name~"{query.lower()}",i'
+    overpass_query = f"""
+[out:json][timeout:25];
+node[{osm_key_value}](around:{radius},{lat},{lon});
+out body;
+"""
+    return overpass_query
 
 
 def get_coords(user_input):
@@ -86,7 +99,8 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
         all_requests = cur.execute(
             '''SELECT * FROM history WHERE link LIKE "https://openweathermap.org/city/%"''').fetchall()
     elif type == 2:
-        all_requests = cur.execute('''SELECT * FROM history WHERE link NOT LIKE "https://openweathermap.org/city/%"''').fetchall()
+        all_requests = cur.execute(
+            '''SELECT * FROM history WHERE link NOT LIKE "https://openweathermap.org/city/%"''').fetchall()
     elif type == 3:
         all_requests = cur.execute('''SELECT * from history''').fetchall()
     if len(all_requests) == 0:
@@ -127,15 +141,122 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
     return
 
 
+async def input_place(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Введите название географического объекта для поиска объектов рядом с ним:')
+    return WAITING_FOR_PLACE_INPUT
+
+
+async def input_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        logger.debug("Получено обновление без текстового сообщения")
+        return
+
+    user_input = update.message.text
+    try:
+        longitude, latitude = map(float, get_coords(user_input).split())
+        context.user_data['place'] = [(longitude, latitude), user_input]
+        await update.message.reply_text('Объект найден. Введите тип объекта, который вы хотите найти рядом с ним:')
+        return WAITING_FOR_TYPE_INPUT
+    except Exception as e:
+        logger.error(f"Произошла ошибка при обработке объекта: {e}")
+        await update.message.reply_text('Не удаётся найти данный географический объект. Попробуйте снова.')
+        await update.message.reply_text('Введите название географического объекта для поиска объектов рядом с ним:')
+        return WAITING_FOR_PLACE_INPUT
+
+
+async def search(update, context):
+    chat_id = update.message.chat_id
+    if not update.message:
+        logger.debug("Получено обновление без текстового сообщения")
+        return
+
+    user_input = update.message.text.strip()
+    lat, lon = context.user_data.get('place')[0]
+    try:
+        # Формируем OverpassQL-запрос
+        overpass_ql = get_overpass_query(user_input, lon, lat)
+        overpass_url = "https://overpass-api.de/api/interpreter"
+
+        response = requests.post(overpass_url, data={'data': overpass_ql})
+
+        if response.status_code != 200:
+            logger.error(f"Overpass API вернул статус: {response.status_code}")
+            await update.message.reply_text("Ошибка сервера. Попробуйте позже.")
+            return WAITING_FOR_TYPE_INPUT
+
+        data = response.json()
+        if not data.get("elements"):
+            logger.warning("Ничего не найдено в указанной области.")
+            await update.message.reply_text("Ничего не найдено. Попробуйте другой тип объекта.")
+            return WAITING_FOR_TYPE_INPUT
+
+        results = []
+        for element in data["elements"]:
+            name = element["tags"].get("name", 'Без названия')
+            coords = (element["lon"], element["lat"])
+            distance = ((coords[0] - lon) ** 2 + (coords[1] - lat) ** 2) ** 0.5
+
+            results.append({
+                'name': name,
+                "coords": coords,
+                "distance": distance
+            })
+        results.sort(key=lambda x: x["distance"])
+        top_results = results[:3]
+        await update.message.reply_text(f'Вблизи от места "{context.user_data.get('place')[1]}" найдены следующие объекты типа "{user_input}":')
+        for i in top_results:
+            name = i['name']
+            lon, lat = i['coords']
+            geocoder_request = f'http://geocode-maps.yandex.ru/1.x/?apikey={API_KEY}&geocode={lon},{lat}&format=json'
+            response = requests.get(geocoder_request)
+            json_response = response.json()
+            address = \
+            json_response["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]["metaDataProperty"][
+                "GeocoderMetaData"]['text']
+            # Вычисляем bbox для одного объекта (небольшая область вокруг точки)
+            delta = 0.01  # Размер области вокруг точки (широта/долгота)
+            bbox = f"{lon - delta},{lat - delta}~{lon + delta},{lat + delta}"
+            response1 = requests.get(
+                f"http://static-maps.yandex.ru/1.x/?ll={lon},{lat}&bbox={bbox}&l=map&pt={lon},{lat},pm2rdm")
+            keyboard = [
+                [InlineKeyboardButton("Открыть карту",
+                                      url=f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            image_data = response1.content
+            image = Image.open(BytesIO(image_data))
+            image.save("img.png")
+
+            with open("img.png", 'rb') as photo:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo,
+                    caption=f"{str(user_input).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
+                    reply_markup=reply_markup
+                )
+            con = sqlite3.connect('requests.db')
+            # Считываем бинарные данные из файла
+            with open("img.png", "rb") as file:
+                photo_blob = file.read()
+            # Создание курсора
+            cur = con.cursor()
+            cur.execute('''INSERT INTO history (photo, text, link) VALUES (?, ?, ?)''', (
+                photo_blob, f"{str(user_input).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
+                f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm"))
+            con.commit()
+            con.close()
+        return ConversationHandler.END
+
+    except Exception as e:
+        logger.error(f"Ошибка при поиске через Overpass API: {e}")
+        await update.message.reply_text("Не удалось выполнить поиск. Попробуйте снова.")
+        return WAITING_FOR_TYPE_INPUT
+
+
 # Начало диалога
 async def start_geocode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Введите название географического объекта:')
     return WAITING_FOR_GEOCODE_INPUT
-
-
-async def start_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Введите название первого географического объекта:')
-    return WAITING_FOR_FIRST_OBJECT
 
 
 async def start_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,6 +318,11 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Не удаётся найти данный географический объект. Попробуйте снова.')
         await update.message.reply_text('Введите название географического объекта:')
         return WAITING_FOR_GEOCODE_INPUT
+
+
+async def start_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Введите название первого географического объекта:')
+    return WAITING_FOR_FIRST_OBJECT
 
 
 async def handle_first_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -351,13 +477,16 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('geocode', start_geocode),
                       CommandHandler('route', start_route),
-                      CommandHandler('weather', start_weather)
+                      CommandHandler('weather', start_weather),
+                      CommandHandler('search', input_place)
                       ],
         states={
             WAITING_FOR_GEOCODE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_location)],
             WAITING_FOR_FIRST_OBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_first_object)],
             WAITING_FOR_SECOND_OBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_second_object)],
             WAITING_FOR_WEATHER_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_weather)],
+            WAITING_FOR_PLACE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_type)],
+            WAITING_FOR_TYPE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, search)],
         },
         fallbacks=[],
     )
