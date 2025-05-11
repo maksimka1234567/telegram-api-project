@@ -53,7 +53,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Это справка по боту. Доступные команды: /start (запуск), /help (справка), /geocode (поиск объекта), "
         "/route (построение маршрута между двумя объектами), /weather (получение информации о погоде), /history (просмотр истории запросов), "
-        "/favorite (просмотр избранных мест), /search (поиск нужных мест поблизости)."
+        "/favorite (просмотр избранных мест), /search (поиск нужных мест поблизости (в России))."
     )
 
 
@@ -491,7 +491,12 @@ def main():
             WAITING_FOR_PLACE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_type)],
             WAITING_FOR_TYPE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, search)],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler('geocode', start_geocode),
+                   CommandHandler('route', start_route),
+                   CommandHandler('weather', start_weather),
+                   CommandHandler('search', input_place),
+                   CommandHandler('history', show_history_options)],
+        per_message=False
     )
 
     application.add_handler(conv_handler)
