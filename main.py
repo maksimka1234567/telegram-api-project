@@ -59,10 +59,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_history_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("Показать историю погоды", callback_data='weather_history')],
-        [InlineKeyboardButton("Показать историю карт", callback_data='map_history')],
-        [InlineKeyboardButton("Показать всю историю", callback_data='all_history')],
-        [InlineKeyboardButton("Очистить историю", callback_data='clear_history')]
+        [InlineKeyboardButton("Показать историю погоды (последние 5 запросов)", callback_data='weather_history')],
+        [InlineKeyboardButton("Показать историю карт (последние 5 запросов)", callback_data='map_history')],
+        [InlineKeyboardButton("Показать всю историю (последние 5 запросов)", callback_data='all_history')],
+        [InlineKeyboardButton("Очистить всю историю", callback_data='clear_history')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text('Выберите один из предложенных вариантов:', reply_markup=reply_markup)
@@ -85,12 +85,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
+    user_id = update.from_user.id
     chat_id = update.message.chat_id
     con = sqlite3.connect('requests.db')
     # Создание курсора
     cur = con.cursor()
     if type == 4:
-        cur.execute('''DELETE from history''')
+        cur.execute('''DELETE from history WHERE user_id = ?''', (user_id,))
         con.commit()
         await update.message.reply_text('История успешно очищена.')
         con.close()
@@ -98,12 +99,12 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
     elif type == 1:
         # Запрашиваем только записи с ссылкой на OpenWeather
         all_requests = cur.execute(
-            '''SELECT * FROM history WHERE link LIKE "https://openweathermap.org/city/%"''').fetchall()
+            '''SELECT * FROM history WHERE link LIKE "https://openweathermap.org/city/%" AND user_id = ?''', (user_id,)).fetchall()
     elif type == 2:
         all_requests = cur.execute(
-            '''SELECT * FROM history WHERE link NOT LIKE "https://openweathermap.org/city/%"''').fetchall()
+            '''SELECT * FROM history WHERE link NOT LIKE "https://openweathermap.org/city/%" AND user_id = ?''', (user_id,)).fetchall()
     elif type == 3:
-        all_requests = cur.execute('''SELECT * from history''').fetchall()
+        all_requests = cur.execute('''SELECT * from history WHERE user_id = ?''', (user_id,)).fetchall()
     if len(all_requests) == 0:
         if type == 1:
             await update.message.reply_text('В последнее время не было запросов на получение информации о погоде.')
@@ -116,11 +117,11 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
     if len(all_requests) > 5:
         all_requests = all_requests[-5:]
     if type == 1:
-        await update.message.reply_text('Вот история запросов на получение информации о погоде:')
+        await update.message.reply_text('Вот история запросов на получение информации о погоде (последние 5):')
     elif type == 2:
-        await update.message.reply_text('Вот история запросов Яндекс.Карт:')
+        await update.message.reply_text('Вот история запросов Яндекс.Карт (последние 5):')
     elif type == 3:
-        await update.message.reply_text('Вот вся история запросов:')
+        await update.message.reply_text('Вот вся история запросов (последние 5):')
     for message in all_requests:
         # Открываем изображение
         image = Image.open(BytesIO(message[1]))
@@ -167,6 +168,7 @@ async def input_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search(update, context):
     chat_id = update.message.chat_id
+    user_id = update.message.from_user.id
     if not update.message:
         logger.debug("Получено обновление без текстового сообщения")
         return
@@ -174,6 +176,7 @@ async def search(update, context):
     user_input = update.message.text.strip()
     lat, lon = context.user_data.get('place')[0]
     try:
+        await update.message.reply_text("Выполняется поиск мест поблизости...")
         # Формируем OverpassQL-запрос
         overpass_ql = get_overpass_query(user_input, lon, lat)
         overpass_url = "https://overpass-api.de/api/interpreter"
@@ -197,18 +200,14 @@ async def search(update, context):
             coords = (element["lon"], element["lat"])
             distance = ((coords[0] - lon) ** 2 + (coords[1] - lat) ** 2) ** 0.5
 
-            results.append({
-                'name': name,
-                "coords": coords,
-                "distance": distance
-            })
-        results.sort(key=lambda x: x["distance"])
-        top_results = results[:3]
+            results.append((name, coords, distance))
+        results.sort(key=lambda x: x[2])
+        top_results = list(set(results[:3]))
         await update.message.reply_text(
-            f'Вблизи от места "{context.user_data.get('place')[1]}" найдены следующие объекты типа "{user_input}":')
+            f"Вблизи от места '{context.user_data.get('place')[1]}' найдены следующие объекты типа '{user_input}':")
         for i in top_results:
-            name = i['name']
-            lon, lat = i['coords']
+            name = i[0]
+            lon, lat = i[1]
             geocoder_request = f'http://geocode-maps.yandex.ru/1.x/?apikey={API_KEY}&geocode={lon},{lat}&format=json'
             response = requests.get(geocoder_request)
             json_response = response.json()
@@ -242,10 +241,12 @@ async def search(update, context):
                 photo_blob = file.read()
             # Создание курсора
             cur = con.cursor()
-            cur.execute('''INSERT INTO history (photo, text, link) VALUES (?, ?, ?)''', (
+            cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
                 photo_blob,
                 f"{str(user_input).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
-                f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm"))
+                f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm",
+                user_id
+            ))
             con.commit()
             con.close()
         return ConversationHandler.END
@@ -274,7 +275,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_input = update.message.text
-
+    user_id = update.message.from_user.id
     chat_id = update.message.chat_id
 
     try:
@@ -310,8 +311,8 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo_blob = file.read()
         # Создание курсора
         cur = con.cursor()
-        cur.execute('''INSERT INTO history (photo, text, link) VALUES (?, ?, ?)''', (
-            photo_blob, f"Найден объект: {user_input}\nНажмите на кнопку, чтобы открыть карту:", geocoder_request[0]))
+        cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
+            photo_blob, f"Найден объект: {user_input}\nНажмите на кнопку, чтобы открыть карту:", geocoder_request[0], user_id))
         con.commit()
         con.close()
         return ConversationHandler.END
@@ -366,6 +367,7 @@ async def handle_second_object(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def route(update: Update, context: ContextTypes.DEFAULT_TYPE, start, end):
+    user_id = update.message.from_user.id
     try:
         response_for_route = (
             f"https://static-maps.yandex.ru/1.x/?l=map&pl="
@@ -396,9 +398,9 @@ async def route(update: Update, context: ContextTypes.DEFAULT_TYPE, start, end):
             photo_blob = file.read()
         # Создание курсора
         cur = con.cursor()
-        cur.execute('''INSERT INTO history (photo, text, link) VALUES (?, ?, ?)''', (
+        cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
             photo_blob, f"Маршрут построен: {start} - {end}\nНажмите на кнопку, чтобы открыть карту:",
-            f"https://yandex.ru/maps/?rtext={start[1]},{start[0]}~{end[1]},{end[0]}"))
+            f"https://yandex.ru/maps/?rtext={start[1]},{start[0]}~{end[1]},{end[0]}", user_id))
         con.commit()
         con.close()
         return ConversationHandler.END
@@ -417,11 +419,12 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     city = update.message.text
     chat_id = update.message.chat_id
+    user_id = update.message.from_user.id
     try:
         url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru"
         response = requests.get(url)
         data = response.json()
-        image_url = f'https://openweathermap.org/img/wn/{data['weather'][0]['icon']}@2x.png'
+        image_url = f"https://openweathermap.org/img/wn/{data['weather'][0]['icon']}@2x.png"
         response_to_image = requests.get(image_url)
         image = Image.open(BytesIO(response_to_image.content))
         # Создание нового изображения с голубым фоном
@@ -459,11 +462,11 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo_blob = file.read()
         # Создание курсора
         cur = con.cursor()
-        cur.execute('''INSERT INTO history (photo, text, link) VALUES (?, ?, ?)''', (
+        cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
             photo_blob,
             f"Город: {city.capitalize()}\nСтрана: {country}\n{temp}\n{feels_like}\n{condition}\n{humidity}\n{pressure}\n{visibility}\n"
             f"{wind_speed}\nНажмите на кнопку, чтобы посмотреть подробную сводку о погоде:",
-            f"https://openweathermap.org/city/{city_id}"))
+            f"https://openweathermap.org/city/{city_id}", user_id))
         con.commit()
         con.close()
         return ConversationHandler.END
