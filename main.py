@@ -205,7 +205,7 @@ async def search(update, context):
         results.sort(key=lambda x: x["distance"])
         top_results = results[:3]
         await update.message.reply_text(
-            f'Вблизи от места "{context.user_data.get('place')[1]}" найдены следующие объекты типа "{user_input}":')
+            f"Вблизи от места '{context.user_data.get('place')[1]}' найдены следующие объекты типа '{user_input}':")
         for i in top_results:
             name = i['name']
             lon, lat = i['coords']
@@ -421,7 +421,7 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru"
         response = requests.get(url)
         data = response.json()
-        image_url = f'https://openweathermap.org/img/wn/{data['weather'][0]['icon']}@2x.png'
+        image_url = f"https://openweathermap.org/img/wn/{data['weather'][0]['icon']}@2x.png"
         response_to_image = requests.get(image_url)
         image = Image.open(BytesIO(response_to_image.content))
         # Создание нового изображения с голубым фоном
