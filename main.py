@@ -59,10 +59,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_history_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("Показать историю погоды", callback_data='weather_history')],
-        [InlineKeyboardButton("Показать историю карт", callback_data='map_history')],
-        [InlineKeyboardButton("Показать всю историю", callback_data='all_history')],
-        [InlineKeyboardButton("Очистить историю", callback_data='clear_history')]
+        [InlineKeyboardButton("Показать историю погоды (последние 5 запросов)", callback_data='weather_history')],
+        [InlineKeyboardButton("Показать историю карт (последние 5 запросов)", callback_data='map_history')],
+        [InlineKeyboardButton("Показать всю историю (последние 5 запросов)", callback_data='all_history')],
+        [InlineKeyboardButton("Очистить всю историю", callback_data='clear_history')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text('Выберите один из предложенных вариантов:', reply_markup=reply_markup)
@@ -116,11 +116,11 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
     if len(all_requests) > 5:
         all_requests = all_requests[-5:]
     if type == 1:
-        await update.message.reply_text('Вот история запросов на получение информации о погоде:')
+        await update.message.reply_text('Вот история запросов на получение информации о погоде (последние 5):')
     elif type == 2:
-        await update.message.reply_text('Вот история запросов Яндекс.Карт:')
+        await update.message.reply_text('Вот история запросов Яндекс.Карт (последние 5):')
     elif type == 3:
-        await update.message.reply_text('Вот вся история запросов:')
+        await update.message.reply_text('Вот вся история запросов (последние 5):')
     for message in all_requests:
         # Открываем изображение
         image = Image.open(BytesIO(message[1]))
