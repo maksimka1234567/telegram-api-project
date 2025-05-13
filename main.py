@@ -91,23 +91,28 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
     user_id = update.from_user.id
     chat_id = update.message.chat_id
     con = sqlite3.connect('requests.db')
-    # Создание курсора
     cur = con.cursor()
+
     if type == 4:
         cur.execute('''DELETE from history WHERE user_id = ?''', (user_id,))
         con.commit()
         await update.message.reply_text('История успешно очищена.')
         con.close()
         return
+
     elif type == 1:
-        # Запрашиваем только записи с ссылкой на OpenWeather
         all_requests = cur.execute(
-            '''SELECT * FROM history WHERE link LIKE "https://openweathermap.org/city/%" AND user_id = ?''', (user_id,)).fetchall()
+            '''SELECT * FROM history WHERE link LIKE "https://openweathermap.org/city/% " AND user_id = ?''',
+            (user_id,)
+        ).fetchall()
     elif type == 2:
         all_requests = cur.execute(
-            '''SELECT * FROM history WHERE link NOT LIKE "https://openweathermap.org/city/%" AND user_id = ?''', (user_id,)).fetchall()
+            '''SELECT * FROM history WHERE link NOT LIKE "https://openweathermap.org/city/% " AND user_id = ?''',
+            (user_id,)
+        ).fetchall()
     elif type == 3:
         all_requests = cur.execute('''SELECT * from history WHERE user_id = ?''', (user_id,)).fetchall()
+
     if len(all_requests) == 0:
         if type == 1:
             await update.message.reply_text('В последнее время не было запросов на получение информации о погоде.')
@@ -117,32 +122,81 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
             await update.message.reply_text('В последнее время не было запросов.')
         con.close()
         return
+
     if type == 1:
         await update.message.reply_text('Вот история запросов на получение информации о погоде:')
     elif type == 2:
         await update.message.reply_text('Вот история запросов Яндекс.Карт:')
     elif type == 3:
         await update.message.reply_text('Вот вся история запросов:')
+
     all_requests.reverse()
-    for message in all_requests:
-        # Открываем изображение
-        image = Image.open(BytesIO(message[1]))
-        image.save("img.png")
-        # Формируем клавиатуру
-        if message[3] and message[3].startswith('https://openweathermap.org/city/'):
-            keyboard = [[InlineKeyboardButton("Открыть подробную сводку о погоде", url=message[3])]]
+    context.user_data['history_results'] = all_requests
+    context.user_data['current_history_index'] = 0
+
+    con.close()
+
+    await send_history_result(update, context, index=0)
+
+
+async def send_history_result(update: Update, context: ContextTypes.DEFAULT_TYPE, index):
+    results = context.user_data.get('history_results', [])
+    current_index = index
+    item = results[current_index]
+    photo_blob = item[1]
+    caption = item[2]
+    link = item[3]
+
+    # Используем BytesIO вместо временного файла
+    photo_io = Image.open(BytesIO(photo_blob))
+    photo_io.save('img.png')
+
+    keyboard = [[InlineKeyboardButton("Открыть подробную информацию", url=link)]]
+
+    nav_buttons = []
+    if current_index > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"hist_prev:{current_index}"))
+    nav_buttons.append(InlineKeyboardButton(f"{current_index + 1} / {len(results)}", callback_data="noop"))
+    if current_index < len(results) - 1:
+        nav_buttons.append(InlineKeyboardButton("➡️ Вперёд", callback_data=f"hist_next:{current_index}"))
+
+    keyboard.append(nav_buttons)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    with open('img.png', 'rb') as photo:
+        if isinstance(update, CallbackQuery):
+            media = InputMediaPhoto(media=photo, caption=caption)
+            await update.edit_message_media(media=media, reply_markup=reply_markup)
         else:
-            keyboard = [[InlineKeyboardButton("Открыть карту", url=message[3])]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        with open("img.png", 'rb') as photo:
             await context.bot.send_photo(
-                chat_id=chat_id,
+                chat_id=update.effective_chat.id,
                 photo=photo,
-                caption=message[2],
+                caption=caption,
                 reply_markup=reply_markup
             )
-    con.close()
-    return
+
+
+async def handle_history_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    action, index = data.split(':')
+    index = int(index)
+    results = context.user_data.get('history_results')
+
+    if not results:
+        await query.message.reply_text("Результаты не найдены.")
+        return
+
+    if action == 'hist_next':
+        new_index = index + 1
+    elif action == 'hist_prev':
+        new_index = index - 1
+    else:
+        return
+
+    if 0 <= new_index < len(results):
+        context.user_data['current_history_index'] = new_index
+        await send_history_result(query, context, index=new_index)
 
 
 async def handle_search_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -281,6 +335,10 @@ async def send_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
     image.save("img.png")
 
     with open("img.png", 'rb') as photo:
+        # Считываем бинарные данные из файла
+        photo_blob = photo.read()
+        # Создаём новое "файло-подобное" представление для отправки
+        photo.seek(0)  # Возвращаем указатель в начало файла
         if isinstance(update, CallbackQuery):
             # Формируем медиа
             media = InputMediaPhoto(media=photo,
@@ -294,17 +352,15 @@ async def send_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 caption=f"{type.capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
                 reply_markup=reply_markup
             )
-        # Считываем бинарные данные из файла
-        photo_blob = photo.read()
-    con = sqlite3.connect('requests.db')
-    # Создание курсора
-    cur = con.cursor()
-    cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
-        photo_blob,
-        f"{str(type).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
-        f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm",
-        update.message.from_user.id
-    ))
+        con = sqlite3.connect('requests.db')
+        # Создание курсора
+        cur = con.cursor()
+        cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
+            photo_blob,
+            f"{str(type).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
+            f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm",
+            update.message.from_user.id
+        ))
     con.commit()
     con.close()
 
@@ -586,6 +642,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("history", show_history_options))
     application.add_handler(CallbackQueryHandler(handle_search_navigation, pattern=r'^(prev|next):'))
+    application.add_handler(CallbackQueryHandler(handle_history_navigation, pattern=r'^(hist_prev|hist_next):'))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     application.run_polling()
