@@ -2,8 +2,7 @@ import requests
 from io import BytesIO
 from PIL import Image
 import logging
-from config import BOT_TOKEN
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, InputMediaPhoto
 from telegram.ext import CommandHandler, MessageHandler, ConversationHandler, ContextTypes, \
     Application, filters, CallbackQueryHandler
 import sqlite3
@@ -113,17 +112,18 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
         if type == 1:
             await update.message.reply_text('В последнее время не было запросов на получение информации о погоде.')
         elif type == 2:
-            await update.message.reply_text('В последнее время не было запросов на получение Яндекс.карт.')
+            await update.message.reply_text('В последнее время не было запросов на получение Яндекс.Карт.')
         elif type == 3:
             await update.message.reply_text('В последнее время не было запросов.')
         con.close()
         return
     if type == 1:
-        await update.message.reply_text('Вот история запросов на получение информации о погоде (последние 5):')
+        await update.message.reply_text('Вот история запросов на получение информации о погоде:')
     elif type == 2:
-        await update.message.reply_text('Вот история запросов Яндекс.Карт (последние 5):')
+        await update.message.reply_text('Вот история запросов Яндекс.Карт:')
     elif type == 3:
-        await update.message.reply_text('Вот вся история запросов (последние 5):')
+        await update.message.reply_text('Вот вся история запросов:')
+    all_requests.reverse()
     for message in all_requests:
         # Открываем изображение
         image = Image.open(BytesIO(message[1]))
@@ -143,6 +143,31 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
             )
     con.close()
     return
+
+
+async def handle_search_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    action, index = data.split(':')
+    index = int(index)
+
+    results = context.user_data.get('search_results')
+    if not results:
+        await query.message.reply_text("Результаты не найдены.")
+        return
+
+    if action == 'next':
+        new_index = index + 1
+    elif action == 'prev':
+        new_index = index - 1
+    else:
+        return
+
+    if 0 <= new_index < len(results):
+        context.user_data['current_index'] = new_index
+        await send_search_result(query, context, index=new_index)
 
 
 async def input_place(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -168,19 +193,7 @@ async def input_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_PLACE_INPUT
 
 
-def is_in_favorite(user_id, link):
-    with sqlite3.connect('requests.db') as con:
-        cur = con.cursor()
-        result = cur.execute(
-            'SELECT 1 FROM favorite WHERE user_id = ? AND link = ?',
-            (user_id, link)
-        ).fetchone()
-        return bool(result)
-
-
 async def search(update, context):
-    chat_id = update.message.chat_id
-    user_id = update.message.from_user.id
     if not update.message:
         logger.debug("Получено обновление без текстового сообщения")
         return
@@ -211,62 +224,114 @@ async def search(update, context):
             name = element["tags"].get("name", 'Без названия')
             coords = (element["lon"], element["lat"])
             distance = ((coords[0] - lon) ** 2 + (coords[1] - lat) ** 2) ** 0.5
-
             results.append((name, coords, distance))
         results.sort(key=lambda x: x[2])
         await update.message.reply_text(
             f"Вблизи от места '{context.user_data.get('place')[1]}' найдены следующие объекты типа '{user_input}':")
-        for i in results:
-            name = i[0]
-            lon, lat = i[1]
-            geocoder_request = f'http://geocode-maps.yandex.ru/1.x/?apikey={API_KEY}&geocode={lon},{lat}&format=json'
-            response = requests.get(geocoder_request)
-            json_response = response.json()
-            address = \
-                json_response["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]["metaDataProperty"][
-                    "GeocoderMetaData"]['text']
-            # Вычисляем bbox для одного объекта (небольшая область вокруг точки)
-            delta = 0.01  # Размер области вокруг точки (широта/долгота)
-            bbox = f"{lon - delta},{lat - delta}~{lon + delta},{lat + delta}"
-            response1 = requests.get(
-                f"http://static-maps.yandex.ru/1.x/?ll={lon},{lat}&bbox={bbox}&l=map&pt={lon},{lat},pm2rdm")
-            url = f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm"
-            keyboard = [
-                [InlineKeyboardButton("Открыть карту",
-                                      url=url)]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            image_data = response1.content
-            image = Image.open(BytesIO(image_data))
-            image.save("img.png")
+        # Сохраняем результаты в контекст пользователя
+        context.user_data['search_results'] = results
+        context.user_data['current_index'] = 0
+        context.user_data['type'] = user_input
 
-            with open("img.png", 'rb') as photo:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo,
-                    caption=f"{str(user_input).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
-                    reply_markup=reply_markup
-                )
-            con = sqlite3.connect('requests.db')
-            # Считываем бинарные данные из файла
-            with open("img.png", "rb") as file:
-                photo_blob = file.read()
-            # Создание курсора
-            cur = con.cursor()
-            cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
-                photo_blob,
-                f"{str(user_input).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
-                f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm",
-                user_id
-            ))
-            con.commit()
-            con.close()
+        # Отправляем первый результат
+        await send_search_result(update, context, index=0)
         return ConversationHandler.END
 
     except Exception as e:
         logger.error(f"Ошибка при поиске через Overpass API: {e}")
         await update.message.reply_text("Не удалось выполнить поиск. Попробуйте снова.")
         return WAITING_FOR_TYPE_INPUT
+
+
+async def send_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE, index):
+    results = context.user_data.get('search_results', [])
+    type = context.user_data.get('type', "")
+    current_index = index
+    item = results[current_index]
+    name = item[0]
+    lon, lat = item[1]
+    geocoder_request = f'http://geocode-maps.yandex.ru/1.x/?apikey={API_KEY}&geocode={lon},{lat}&format=json'
+    response = requests.get(geocoder_request)
+    json_response = response.json()
+    address = \
+        json_response["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]["metaDataProperty"][
+            "GeocoderMetaData"]['text']
+    # Вычисляем bbox для одного объекта (небольшая область вокруг точки)
+    delta = 0.01  # Размер области вокруг точки (широта/долгота)
+    bbox = f"{lon - delta},{lat - delta}~{lon + delta},{lat + delta}"
+    response1 = requests.get(
+        f"http://static-maps.yandex.ru/1.x/?ll={lon},{lat}&bbox={bbox}&l=map&pt={lon},{lat},pm2rdm")
+    url = f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm"
+    keyboard = [
+        [InlineKeyboardButton("Открыть карту",
+                              url=url)]
+    ]
+    # Кнопки навигации
+    nav_buttons = []
+    if current_index > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"prev:{current_index}"))
+    nav_buttons.append(InlineKeyboardButton(f"{current_index + 1} / {len(results)}", callback_data="noop"))
+    if current_index < len(results) - 1:
+        nav_buttons.append(InlineKeyboardButton("➡️ Вперёд", callback_data=f"next:{current_index}"))
+
+    keyboard.append(nav_buttons)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    image_data = response1.content
+    image = Image.open(BytesIO(image_data))
+    image.save("img.png")
+
+    with open("img.png", 'rb') as photo:
+        if isinstance(update, CallbackQuery):
+            # Формируем медиа
+            media = InputMediaPhoto(media=photo,
+                                    caption=f"{type.capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:")
+            # Редактируем сообщение
+            await update.edit_message_media(media=media, reply_markup=reply_markup)
+        else:
+            await context.bot.send_photo(
+                chat_id=update.effective_message.chat_id,
+                photo=photo,
+                caption=f"{type.capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
+                reply_markup=reply_markup
+            )
+        # Считываем бинарные данные из файла
+        photo_blob = photo.read()
+    con = sqlite3.connect('requests.db')
+    # Создание курсора
+    cur = con.cursor()
+    cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
+        photo_blob,
+        f"{str(type).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
+        f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm",
+        update.message.from_user.id
+    ))
+    con.commit()
+    con.close()
+
+
+async def handle_search_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    action, index = data.split(':')
+    index = int(index)
+
+    results = context.user_data.get('search_results')
+    if not results:
+        await query.message.reply_text("Результаты не найдены.")
+        return
+
+    if action == 'next':
+        new_index = index + 1
+    elif action == 'prev':
+        new_index = index - 1
+    else:
+        return
+
+    if 0 <= new_index < len(results):
+        context.user_data['current_index'] = new_index
+        await send_search_result(query, context, index=new_index)
 
 
 # Начало диалога
@@ -493,7 +558,7 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token('7612561980:AAFCPRGsdXARg2ee5kF6hm1-aP5wYdQjMpI').build()
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('geocode', start_geocode),
                       CommandHandler('route', start_route),
@@ -520,7 +585,9 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("history", show_history_options))
+    application.add_handler(CallbackQueryHandler(handle_search_navigation, pattern=r'^(prev|next):'))
     application.add_handler(CallbackQueryHandler(button_handler))
+
     application.run_polling()
 
 
