@@ -24,7 +24,7 @@ WEATHER_KEY = 'c0c8ea3bf67266e89078d8488a2ac94d'
 
 
 # Формирование OverpassQL-запроса
-def get_overpass_query(query: str, lat: float, lon: float, radius: int = 10000) -> str:
+def get_overpass_query(query: str, lat: float, lon: float, radius: int = 1000) -> str:
     osm_key_value = f'name~"{query.lower()}",i'
     overpass_query = f"""
 [out:json][timeout:25];
@@ -42,26 +42,30 @@ def get_coords(user_input):
     return coordinates
 
 
-# Обработчик команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Добро пожаловать! Используйте команды или введите текст для получения списка команд.")
+    await update.message.reply_text("Привет! Я бот для поиска информации о погоде, маршрутов, географических объектов и поиска мест поблизости.")
+    await help_command(update, context)
 
 
 # Обработчик команды /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Это справка по боту. Доступные команды: /start (запуск), /help (справка), /geocode (поиск объекта), "
-        "/route (построение маршрута между двумя объектами), /weather (получение информации о погоде), /history (просмотр истории запросов), "
-        "/favorite (просмотр избранных мест), /search (поиск нужных мест поблизости (в России))."
+        "Доступные команды:\n"
+        "/start - запуск\n"
+        "/help - справка\n"
+        "/geocode - поиск объекта\n"
+        "/route - построение маршрута\n"
+        "/weather - информация о погоде\n"
+        "/search - поиск мест поблизости\n"
+        "/history - история запросов"
     )
 
 
 async def show_history_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("Показать историю погоды (последние 5 запросов)", callback_data='weather_history')],
-        [InlineKeyboardButton("Показать историю карт (последние 5 запросов)", callback_data='map_history')],
-        [InlineKeyboardButton("Показать всю историю (последние 5 запросов)", callback_data='all_history')],
+        [InlineKeyboardButton("Показать историю погоды", callback_data='weather_history')],
+        [InlineKeyboardButton("Показать историю карт", callback_data='map_history')],
+        [InlineKeyboardButton("Показать всю историю", callback_data='all_history')],
         [InlineKeyboardButton("Очистить всю историю", callback_data='clear_history')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -114,8 +118,6 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
             await update.message.reply_text('В последнее время не было запросов.')
         con.close()
         return
-    if len(all_requests) > 5:
-        all_requests = all_requests[-5:]
     if type == 1:
         await update.message.reply_text('Вот история запросов на получение информации о погоде (последние 5):')
     elif type == 2:
@@ -166,6 +168,16 @@ async def input_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_PLACE_INPUT
 
 
+def is_in_favorite(user_id, link):
+    with sqlite3.connect('requests.db') as con:
+        cur = con.cursor()
+        result = cur.execute(
+            'SELECT 1 FROM favorite WHERE user_id = ? AND link = ?',
+            (user_id, link)
+        ).fetchone()
+        return bool(result)
+
+
 async def search(update, context):
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
@@ -202,10 +214,9 @@ async def search(update, context):
 
             results.append((name, coords, distance))
         results.sort(key=lambda x: x[2])
-        top_results = list(set(results[:3]))
         await update.message.reply_text(
             f"Вблизи от места '{context.user_data.get('place')[1]}' найдены следующие объекты типа '{user_input}':")
-        for i in top_results:
+        for i in results:
             name = i[0]
             lon, lat = i[1]
             geocoder_request = f'http://geocode-maps.yandex.ru/1.x/?apikey={API_KEY}&geocode={lon},{lat}&format=json'
@@ -219,9 +230,10 @@ async def search(update, context):
             bbox = f"{lon - delta},{lat - delta}~{lon + delta},{lat + delta}"
             response1 = requests.get(
                 f"http://static-maps.yandex.ru/1.x/?ll={lon},{lat}&bbox={bbox}&l=map&pt={lon},{lat},pm2rdm")
+            url = f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm"
             keyboard = [
                 [InlineKeyboardButton("Открыть карту",
-                                      url=f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm")]
+                                      url=url)]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             image_data = response1.content
@@ -378,9 +390,10 @@ async def route(update: Update, context: ContextTypes.DEFAULT_TYPE, start, end):
         response = requests.get(response_for_route)
         image_data = response.content
         image = Image.open(BytesIO(image_data))
+        url = f"https://yandex.ru/maps/?rtext={start[1]},{start[0]}~{end[1]},{end[0]}"
         keyboard = [
             [InlineKeyboardButton("Открыть карту",
-                                  url=f"https://yandex.ru/maps/?rtext={start[1]},{start[0]}~{end[1]},{end[0]}")]
+                                  url=url)]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         image.save("img.png")
@@ -435,9 +448,10 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_image.paste(image, (0, 0), image if image.mode == 'RGBA' else None)
         new_image.save('img.png')
         city_id = data['id']
+        url = f"https://openweathermap.org/city/{city_id}"
         keyboard = [
             [InlineKeyboardButton("Открыть подробную сводку о погоде",
-                                  url=f"https://openweathermap.org/city/{city_id}")]
+                                  url=url)]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         country = data['sys']['country']
