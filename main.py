@@ -1,3 +1,4 @@
+# импортируем все необходимые модули и библиотеки
 import requests
 from io import BytesIO
 from PIL import Image
@@ -7,23 +8,24 @@ from telegram.ext import CommandHandler, MessageHandler, ConversationHandler, Co
     Application, filters, CallbackQueryHandler
 import sqlite3
 
+# Запускаем логгирование
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
 )
 
 logger = logging.getLogger(__name__)
-WAITING_FOR_GEOCODE_INPUT = 1
+WAITING_FOR_GEOCODE_INPUT = 1  # переменные для ожидания ввода текста после сообщений бота
 WAITING_FOR_FIRST_OBJECT = 2
 WAITING_FOR_SECOND_OBJECT = 3
 WAITING_FOR_WEATHER_INPUT = 4
 WAITING_FOR_TYPE_INPUT = 5
 WAITING_FOR_PLACE_INPUT = 6
-API_KEY = '8013b162-6b42-4997-9691-77b7074026e0'
-WEATHER_KEY = 'c0c8ea3bf67266e89078d8488a2ac94d'
+API_KEY = '8013b162-6b42-4997-9691-77b7074026e0'  # ключ для yandex api
+WEATHER_KEY = 'c0c8ea3bf67266e89078d8488a2ac94d'  # ключ для openweathermap api
 
 
-# Формирование OverpassQL-запроса
-def get_overpass_query(query: str, lat: float, lon: float, radius: int = 1000) -> str:
+# Формирование OverpassQL-запроса (для поиска мест поблизости в радиусе 10 км)
+def get_overpass_query(query: str, lat: float, lon: float, radius: int = 10000) -> str:
     osm_key_value = f'name~"{query.lower()}",i'
     overpass_query = f"""
 [out:json][timeout:25];
@@ -33,7 +35,7 @@ out body;
     return overpass_query
 
 
-def get_coords(user_input):
+def get_coords(user_input):  # получение координат объекта
     geocoder_request = f'http://geocode-maps.yandex.ru/1.x/?apikey={API_KEY}&geocode={user_input}&format=json'
     response = requests.get(geocoder_request)
     data = response.json()
@@ -41,12 +43,13 @@ def get_coords(user_input):
     return coordinates
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я бот для поиска информации о погоде, маршрутов, географических объектов и поиска мест поблизости.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):  # приветствие бота
+    await update.message.reply_text(
+        "Привет! Я бот для поиска информации о погоде, географических объектах, местах поблизости и для построения маршрутов.")
     await help_command(update, context)
 
 
-# Обработчик команды /help
+# Обработчик команды для справки по боту
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Доступные команды:\n"
@@ -60,6 +63,70 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# Начало диалога для поиска объекта
+async def start_geocode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Введите название географического объекта:')
+    return WAITING_FOR_GEOCODE_INPUT
+
+
+# Обработка ввода пользователя и поиск объекта
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        logger.debug("Получено обновление без текстового сообщения")
+        return
+
+    user_input = update.message.text
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat_id
+
+    try:  # запрос к введённому месту, получение его координат и отображение на статической карте в виде фото с ссылкой на Яндекс.Карты
+        longitude, latitude = map(float, get_coords(user_input).split())
+        # Вычисляем bbox для одного объекта (небольшая область вокруг точки)
+        delta = 0.01  # Размер области вокруг точки (широта/долгота)
+        bbox = f"{longitude - delta},{latitude - delta}~{longitude + delta},{latitude + delta}"
+        geocoder_request = [
+            f"http://yandex.ru/maps/?ll={longitude},{latitude}&z=15&l=map&pt={longitude},{latitude},pm2rdm",
+            f"http://static-maps.yandex.ru/1.x/?ll={longitude},{latitude}&bbox={bbox}&l=map&pt={longitude},{latitude},pm2rdm"
+        ]
+
+        keyboard = [
+            [InlineKeyboardButton("Открыть карту", url=geocoder_request[0])]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        response1 = requests.get(geocoder_request[1])
+        image_data = response1.content
+        image = Image.open(BytesIO(image_data))
+        image.save("img.png")
+
+        with open("img.png", 'rb') as photo:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=f"Найден объект: {user_input}\nНажмите на кнопку, чтобы открыть карту:",
+                reply_markup=reply_markup
+            )
+        con = sqlite3.connect('requests.db')
+        # Считываем бинарные данные из файла
+        with open("img.png", "rb") as file:
+            photo_blob = file.read()
+        # Создание курсора
+        cur = con.cursor()
+        cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
+            photo_blob, f"Найден объект: {user_input}\nНажмите на кнопку, чтобы открыть карту:", geocoder_request[0],
+            user_id))
+        con.commit()
+        con.close()
+        return ConversationHandler.END
+
+    except Exception as e:
+        logger.error(f"Произошла ошибка: {e}")
+        await update.message.reply_text('Не удаётся найти данный географический объект. Попробуйте снова.')
+        await update.message.reply_text('Введите название географического объекта:')
+        return WAITING_FOR_GEOCODE_INPUT
+
+
+# кнопки для выбора варианта при вызове команды /history
 async def show_history_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Показать историю погоды", callback_data='weather_history')],
@@ -71,7 +138,7 @@ async def show_history_options(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text('Выберите один из предложенных вариантов:', reply_markup=reply_markup)
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):  # обработчик этих кнопок
     query = update.callback_query
     await query.answer()
 
@@ -87,14 +154,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await history(query, context, type=4)
 
 
-async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
-    user_id = update.from_user.id
-    chat_id = update.message.chat_id
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                  type):  # обработка сообщений бота и запросов в базу данных после нажатия кнопки
+    user_id = update.from_user  # чтобы получать доступ к истории конкретного пользователя
     con = sqlite3.connect('requests.db')
     cur = con.cursor()
 
     if type == 4:
-        cur.execute('''DELETE from history WHERE user_id = ?''', (user_id,))
+        cur.execute('''DELETE from history WHERE user_id = ?''', (user_id,))  # очистить историю данного пользователя
         con.commit()
         await update.message.reply_text('История успешно очищена.')
         con.close()
@@ -102,18 +169,18 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
 
     elif type == 1:
         all_requests = cur.execute(
-            '''SELECT * FROM history WHERE link LIKE "https://openweathermap.org/city/% " AND user_id = ?''',
+            '''SELECT * FROM history WHERE link LIKE "https://openweathermap.org/city/%" AND user_id = ?''',
             (user_id,)
-        ).fetchall()
+        ).fetchall()  # история запросов погоды
     elif type == 2:
         all_requests = cur.execute(
-            '''SELECT * FROM history WHERE link NOT LIKE "https://openweathermap.org/city/% " AND user_id = ?''',
+            '''SELECT * FROM history WHERE link NOT LIKE "https://openweathermap.org/city/%" AND user_id = ?''',
             (user_id,)
-        ).fetchall()
+        ).fetchall()  # история запросов карт
     elif type == 3:
-        all_requests = cur.execute('''SELECT * from history WHERE user_id = ?''', (user_id,)).fetchall()
+        all_requests = cur.execute('''SELECT * from history WHERE user_id = ?''', (user_id,)).fetchall()  # вся история
 
-    if len(all_requests) == 0:
+    if len(all_requests) == 0:  # в случае отсутствия истории
         if type == 1:
             await update.message.reply_text('В последнее время не было запросов на получение информации о погоде.')
         elif type == 2:
@@ -131,16 +198,17 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE, type):
         await update.message.reply_text('Вот вся история запросов:')
 
     all_requests.reverse()
-    context.user_data['history_results'] = all_requests
+    context.user_data[
+        'history_results'] = all_requests  # для сохранения списка и последующей отправки сообщения с кнопками навигации
     context.user_data['current_history_index'] = 0
-
     con.close()
-
     await send_history_result(update, context, index=0)
+    return ConversationHandler.END
 
 
-async def send_history_result(update: Update, context: ContextTypes.DEFAULT_TYPE, index):
-    results = context.user_data.get('history_results', [])
+async def send_history_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                              index):  # отправка нужного результата в зависимости от типа запроса к истории
+    results = context.user_data.get('history_results', [])  # получение нужного списка с историей из данных в боте
     current_index = index
     item = results[current_index]
     photo_blob = item[1]
@@ -153,7 +221,7 @@ async def send_history_result(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     keyboard = [[InlineKeyboardButton("Открыть подробную информацию", url=link)]]
 
-    nav_buttons = []
+    nav_buttons = []  # кнопки навигации
     if current_index > 0:
         nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"hist_prev:{current_index}"))
     nav_buttons.append(InlineKeyboardButton(f"{current_index + 1} / {len(results)}", callback_data="noop"))
@@ -162,11 +230,11 @@ async def send_history_result(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     keyboard.append(nav_buttons)
     reply_markup = InlineKeyboardMarkup(keyboard)
-    with open('img.png', 'rb') as photo:
-        if isinstance(update, CallbackQuery):
+    with open('img.png', 'rb') as photo:  # отправка текущего запроса
+        if isinstance(update, CallbackQuery):  # просто изменение сообщения при нажатии на кнопку навигации
             media = InputMediaPhoto(media=photo, caption=caption)
             await update.edit_message_media(media=media, reply_markup=reply_markup)
-        else:
+        else:  # отправка сообщения в первый раз
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id,
                 photo=photo,
@@ -175,7 +243,8 @@ async def send_history_result(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
 
-async def handle_history_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_history_navigation(update: Update,
+                                    context: ContextTypes.DEFAULT_TYPE):  # обработчик перелистывания запросов в истории поиска в одном сообщении бота
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -194,42 +263,19 @@ async def handle_history_navigation(update: Update, context: ContextTypes.DEFAUL
     else:
         return
 
-    if 0 <= new_index < len(results):
+    if 0 <= new_index < len(results):  # следующий/предыдущий запрос
         context.user_data['current_history_index'] = new_index
         await send_history_result(query, context, index=new_index)
 
 
-async def handle_search_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    action, index = data.split(':')
-    index = int(index)
-
-    results = context.user_data.get('search_results')
-    if not results:
-        await query.message.reply_text("Результаты не найдены.")
-        return
-
-    if action == 'next':
-        new_index = index + 1
-    elif action == 'prev':
-        new_index = index - 1
-    else:
-        return
-
-    if 0 <= new_index < len(results):
-        context.user_data['current_index'] = new_index
-        await send_search_result(query, context, index=new_index)
-
-
-async def input_place(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def input_place(update: Update,
+                      context: ContextTypes.DEFAULT_TYPE):  # начало диалога с ботом при использовании функции для поиска поблизости
     await update.message.reply_text('Введите название географического объекта для поиска объектов рядом с ним:')
     return WAITING_FOR_PLACE_INPUT
 
 
-async def input_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def input_type(update: Update,
+                     context: ContextTypes.DEFAULT_TYPE):  # обработка введённого места и ожидание ввода типа искомых объектов рядом
     if not update.message:
         logger.debug("Получено обновление без текстового сообщения")
         return
@@ -237,7 +283,7 @@ async def input_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text
     try:
         longitude, latitude = map(float, get_coords(user_input).split())
-        context.user_data['place'] = [(longitude, latitude), user_input]
+        context.user_data['place'] = [(longitude, latitude), user_input]  # сохраняем координаты в память бота
         await update.message.reply_text('Объект найден. Введите тип объекта, который вы хотите найти рядом с ним:')
         return WAITING_FOR_TYPE_INPUT
     except Exception as e:
@@ -247,13 +293,14 @@ async def input_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_PLACE_INPUT
 
 
-async def search(update, context):
+async def search(update,
+                 context):  # Обработчик введённых данных и поиск нужных мест поблизости в радиусе 10 км через overpass api
     if not update.message:
         logger.debug("Получено обновление без текстового сообщения")
         return
 
     user_input = update.message.text.strip()
-    lat, lon = context.user_data.get('place')[0]
+    lat, lon = context.user_data.get('place')[0]  # получение координат из памяти бота
     try:
         await update.message.reply_text("Выполняется поиск мест поблизости...")
         # Формируем OverpassQL-запрос
@@ -274,7 +321,7 @@ async def search(update, context):
             return WAITING_FOR_TYPE_INPUT
 
         results = []
-        for element in data["elements"]:
+        for element in data["elements"]:  # получение и обработка всех нужных мест поблизости
             name = element["tags"].get("name", 'Без названия')
             coords = (element["lon"], element["lat"])
             distance = ((coords[0] - lon) ** 2 + (coords[1] - lat) ** 2) ** 0.5
@@ -283,7 +330,7 @@ async def search(update, context):
         await update.message.reply_text(
             f"Вблизи от места '{context.user_data.get('place')[1]}' найдены следующие объекты типа '{user_input}':")
         # Сохраняем результаты в контекст пользователя
-        context.user_data['search_results'] = results
+        context.user_data['search_results'] = results  # сохранение для последующей отправки с кнопками навигации
         context.user_data['current_index'] = 0
         context.user_data['type'] = user_input
 
@@ -297,13 +344,15 @@ async def search(update, context):
         return WAITING_FOR_TYPE_INPUT
 
 
-async def send_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE, index):
+async def send_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                             index):  # отправка результатов поиска поблизости с кнопками для навигации
     results = context.user_data.get('search_results', [])
     type = context.user_data.get('type', "")
     current_index = index
     item = results[current_index]
     name = item[0]
     lon, lat = item[1]
+    # отображение полученных результатов на фото со статической картой, описанием и ссылкой
     geocoder_request = f'http://geocode-maps.yandex.ru/1.x/?apikey={API_KEY}&geocode={lon},{lat}&format=json'
     response = requests.get(geocoder_request)
     json_response = response.json()
@@ -339,19 +388,20 @@ async def send_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
         photo_blob = photo.read()
         # Создаём новое "файло-подобное" представление для отправки
         photo.seek(0)  # Возвращаем указатель в начало файла
-        if isinstance(update, CallbackQuery):
+        if isinstance(update, CallbackQuery):  # при нажатии на кнопку
             # Формируем медиа
             media = InputMediaPhoto(media=photo,
                                     caption=f"{type.capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:")
             # Редактируем сообщение
             await update.edit_message_media(media=media, reply_markup=reply_markup)
-        else:
+        else:  # при отправке в первый раз
             await context.bot.send_photo(
                 chat_id=update.effective_message.chat_id,
                 photo=photo,
                 caption=f"{type.capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
                 reply_markup=reply_markup
             )
+        # сохранение просматриваемых запросов в историю поиска (в базу данных)
         con = sqlite3.connect('requests.db')
         # Создание курсора
         cur = con.cursor()
@@ -365,7 +415,7 @@ async def send_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
     con.close()
 
 
-async def handle_search_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_search_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):  # обработчик кнопок навигации
     query = update.callback_query
     await query.answer()
 
@@ -385,84 +435,19 @@ async def handle_search_navigation(update: Update, context: ContextTypes.DEFAULT
     else:
         return
 
-    if 0 <= new_index < len(results):
+    if 0 <= new_index < len(results):  # следующий/предыдущий результат поиска
         context.user_data['current_index'] = new_index
         await send_search_result(query, context, index=new_index)
 
 
-# Начало диалога
-async def start_geocode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Введите название географического объекта:')
-    return WAITING_FOR_GEOCODE_INPUT
-
-
-async def start_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Введите название населённого пункта:')
-    return WAITING_FOR_WEATHER_INPUT
-
-
-# Обработка ввода пользователя
-async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        logger.debug("Получено обновление без текстового сообщения")
-        return
-
-    user_input = update.message.text
-    user_id = update.message.from_user.id
-    chat_id = update.message.chat_id
-
-    try:
-        longitude, latitude = map(float, get_coords(user_input).split())
-        # Вычисляем bbox для одного объекта (небольшая область вокруг точки)
-        delta = 0.01  # Размер области вокруг точки (широта/долгота)
-        bbox = f"{longitude - delta},{latitude - delta}~{longitude + delta},{latitude + delta}"
-        geocoder_request = [
-            f"http://yandex.ru/maps/?ll={longitude},{latitude}&z=15&l=map&pt={longitude},{latitude},pm2rdm",
-            f"http://static-maps.yandex.ru/1.x/?ll={longitude},{latitude}&bbox={bbox}&l=map&pt={longitude},{latitude},pm2rdm"
-        ]
-
-        keyboard = [
-            [InlineKeyboardButton("Открыть карту", url=geocoder_request[0])]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        response1 = requests.get(geocoder_request[1])
-        image_data = response1.content
-        image = Image.open(BytesIO(image_data))
-        image.save("img.png")
-
-        with open("img.png", 'rb') as photo:
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=photo,
-                caption=f"Найден объект: {user_input}\nНажмите на кнопку, чтобы открыть карту:",
-                reply_markup=reply_markup
-            )
-        con = sqlite3.connect('requests.db')
-        # Считываем бинарные данные из файла
-        with open("img.png", "rb") as file:
-            photo_blob = file.read()
-        # Создание курсора
-        cur = con.cursor()
-        cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
-            photo_blob, f"Найден объект: {user_input}\nНажмите на кнопку, чтобы открыть карту:", geocoder_request[0], user_id))
-        con.commit()
-        con.close()
-        return ConversationHandler.END
-
-    except Exception as e:
-        logger.error(f"Произошла ошибка: {e}")
-        await update.message.reply_text('Не удаётся найти данный географический объект. Попробуйте снова.')
-        await update.message.reply_text('Введите название географического объекта:')
-        return WAITING_FOR_GEOCODE_INPUT
-
-
-async def start_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_route(update: Update,
+                      context: ContextTypes.DEFAULT_TYPE):  # начало диалога для построения маршрута и ожидание ввода первого объекта
     await update.message.reply_text('Введите название первого географического объекта:')
     return WAITING_FOR_FIRST_OBJECT
 
 
-async def handle_first_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_first_object(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE):  # обработка первого объекта и ожидание ввода второго объекта
     if not update.message:
         logger.debug("Получено обновление без текстового сообщения")
         return
@@ -480,7 +465,8 @@ async def handle_first_object(update: Update, context: ContextTypes.DEFAULT_TYPE
         return WAITING_FOR_FIRST_OBJECT
 
 
-async def handle_second_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_second_object(update: Update,
+                               context: ContextTypes.DEFAULT_TYPE):  # обработка второго объекта и завершение диалога
     if not update.message:
         logger.debug("Получено обновление без текстового сообщения")
         return
@@ -499,9 +485,9 @@ async def handle_second_object(update: Update, context: ContextTypes.DEFAULT_TYP
         return WAITING_FOR_SECOND_OBJECT
 
 
-async def route(update: Update, context: ContextTypes.DEFAULT_TYPE, start, end):
+async def route(update: Update, context: ContextTypes.DEFAULT_TYPE, start, end):  # построение маршрута
     user_id = update.message.from_user.id
-    try:
+    try:  # с помощью запроса строим маршрут между объектами и изображаем его на фото с помощью PIL
         response_for_route = (
             f"https://static-maps.yandex.ru/1.x/?l=map&pl="
             f"c:ec473fFF,w:5,{start[0]},{start[1]},{end[0]},{end[1]}"
@@ -545,7 +531,14 @@ async def route(update: Update, context: ContextTypes.DEFAULT_TYPE, start, end):
         return WAITING_FOR_FIRST_OBJECT
 
 
-async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_weather(update: Update,
+                        context: ContextTypes.DEFAULT_TYPE):  # начало диалога для запроса к получению информации о погоде
+    await update.message.reply_text('Введите название населённого пункта:')
+    return WAITING_FOR_WEATHER_INPUT
+
+
+async def handle_weather(update: Update,
+                         context: ContextTypes.DEFAULT_TYPE):  # обработка и получение подробной информации о погоде
     global WEATHER_KEY
     if not update.message:
         logger.debug("Получено обновление без текстового сообщения")
@@ -554,14 +547,14 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     city = update.message.text
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
-    try:
+    try:  # c помощью запроса к openweathermap api получаем всю нужную информацию о погоде во введённом населённом пункте
         url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru"
         response = requests.get(url)
         data = response.json()
-        image_url = f"https://openweathermap.org/img/wn/{data['weather'][0]['icon']}@2x.png"
+        image_url = f"https://openweathermap.org/img/wn/{data['weather'][0]['icon']}@2x.png"  # наглядное изображение с состоянием погоды, взятое из запроса
         response_to_image = requests.get(image_url)
         image = Image.open(BytesIO(response_to_image.content))
-        # Создание нового изображения с голубым фоном
+        # Создание нового изображения с голубым фоном для более удобного обозрения
         background_color = (135, 206, 250)  # RGB-значение голубого цвета
         new_image = Image.new("RGB", image.size, background_color)
 
@@ -595,7 +588,7 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Считываем бинарные данные из файла
         with open("img.png", "rb") as file:
             photo_blob = file.read()
-        # Создание курсора
+        # Создание курсора и сохранение в историю поиска
         cur = con.cursor()
         cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
             photo_blob,
@@ -613,40 +606,45 @@ async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_WEATHER_INPUT
 
 
-def main():
-    application = Application.builder().token('7612561980:AAFCPRGsdXARg2ee5kF6hm1-aP5wYdQjMpI').build()
+def main():  # основная функция программы
+    # создание бота с помощью токена, выданного BotFather
+    application = Application.builder().token(
+        '7612561980:AAFCPRGsdXARg2ee5kF6hm1-aP5wYdQjMpI').build()
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('geocode', start_geocode),
                       CommandHandler('route', start_route),
                       CommandHandler('weather', start_weather),
                       CommandHandler('search', input_place)
-                      ],
+                      ],  # функции, использующие диалог с ботом (ConversationHandler)
         states={
+            # параметры для ожидания ввода текста пользователем и последующая обработка данного ввода
             WAITING_FOR_GEOCODE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_location)],
             WAITING_FOR_FIRST_OBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_first_object)],
             WAITING_FOR_SECOND_OBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_second_object)],
             WAITING_FOR_WEATHER_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_weather)],
             WAITING_FOR_PLACE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_type)],
             WAITING_FOR_TYPE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, search)],
-        },
+        },  # далее функции, запускающиеся сразу после вызова той или иной команды в чате с ботом
         fallbacks=[CommandHandler('geocode', start_geocode),
                    CommandHandler('route', start_route),
                    CommandHandler('weather', start_weather),
                    CommandHandler('search', input_place),
                    CommandHandler('history', show_history_options)],
-        per_message=False
+        per_message=False  # параметр для возможности прерывания диалога и вызова какой-либо другой команды
     )
 
-    application.add_handler(conv_handler)
+    application.add_handler(conv_handler)  # добавление диалога с ботом
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("history", show_history_options))
-    application.add_handler(CallbackQueryHandler(handle_search_navigation, pattern=r'^(prev|next):'))
+    application.add_handler(CommandHandler("history", show_history_options))  # добавление всех остальных команд
+    application.add_handler(CallbackQueryHandler(handle_search_navigation,
+                                                 pattern=r'^(prev|next):'))
+    # добавление обработчиков кнопок под сообщениями бота
     application.add_handler(CallbackQueryHandler(handle_history_navigation, pattern=r'^(hist_prev|hist_next):'))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    application.run_polling()
+    application.run_polling()  # запуск бота
 
 
 if __name__ == '__main__':
-    main()
+    main()  # запуск всей программы
