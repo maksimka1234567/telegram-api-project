@@ -156,7 +156,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):  #
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE,
                   type):  # обработка сообщений бота и запросов в базу данных после нажатия кнопки
-    user_id = update.from_user  # чтобы получать доступ к истории конкретного пользователя
+    user_id = update.from_user.id  # чтобы получать доступ к истории конкретного пользователя
     con = sqlite3.connect('requests.db')
     cur = con.cursor()
 
@@ -382,12 +382,29 @@ async def send_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
     image_data = response1.content
     image = Image.open(BytesIO(image_data))
     image.save("img.png")
-
-    with open("img.png", 'rb') as photo:
-        # Считываем бинарные данные из файла
+    # сохранение просматриваемых запросов в историю поиска (в базу данных)
+    with open('img.png', 'rb') as photo:
         photo_blob = photo.read()
-        # Создаём новое "файло-подобное" представление для отправки
-        photo.seek(0)  # Возвращаем указатель в начало файла
+        con = sqlite3.connect('requests.db')
+        # Создание курсора
+        cur = con.cursor()
+        if isinstance(update, CallbackQuery):
+            cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
+                photo_blob,
+                f"{str(type).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
+                f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm",
+                update.from_user.id
+            ))
+        else:
+            cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
+                photo_blob,
+                f"{str(type).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
+                f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm",
+                update.effective_message.from_user.id
+            ))
+        con.commit()
+        con.close()
+    with open("img.png", 'rb') as photo:
         if isinstance(update, CallbackQuery):  # при нажатии на кнопку
             # Формируем медиа
             media = InputMediaPhoto(media=photo,
@@ -401,18 +418,6 @@ async def send_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 caption=f"{type.capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
                 reply_markup=reply_markup
             )
-        # сохранение просматриваемых запросов в историю поиска (в базу данных)
-        con = sqlite3.connect('requests.db')
-        # Создание курсора
-        cur = con.cursor()
-        cur.execute('''INSERT INTO history (photo, text, link, user_id) VALUES (?, ?, ?, ?)''', (
-            photo_blob,
-            f"{str(type).capitalize()}: {name}\nПо адресу: {address}\nНажмите на кнопку, чтобы открыть карту:",
-            f"http://yandex.ru/maps/?ll={lon},{lat}&z=15&l=map&pt={lon},{lat},pm2rdm",
-            update.message.from_user.id
-        ))
-    con.commit()
-    con.close()
 
 
 async def handle_search_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):  # обработчик кнопок навигации
