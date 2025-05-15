@@ -614,7 +614,7 @@ async def handle_weather(update: Update,
 def main():  # основная функция программы
     # создание бота с помощью токена, выданного BotFather
     application = Application.builder().token(
-        '7612561980:AAFCPRGsdXARg2ee5kF6hm1-aP5wYdQjMpI').build()
+        '7612561980:AAFFWODOyq_RlREZTz37AjCZUXqjgJCEKi4').build()
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('geocode', start_geocode),
                       CommandHandler('route', start_route),
